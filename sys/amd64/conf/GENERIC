@@ -93,6 +93,14 @@ options 	RCTL			# Resource limits
 options 	KDB			# Enable kernel debugger support.
 options 	KDB_TRACE		# Print a stack trace for a panic.
 
+options		KTR
+options		KTR_COMPILE=(KTR_GEN)
+options		KTR_MASK=(KTR_ALL)
+options		KTR_VERBOSE
+options		ALQ
+options		KTR_ALQ
+#options		KTR_CPUMASK=0xFFFFFF # Looks like I don't need this?
+
 # Kernel Sanitizers
 #options 	COVERAGE		# Generic kernel coverage. Used by KCOV
 #options 	KCOV			# Kernel Coverage Sanitizer
