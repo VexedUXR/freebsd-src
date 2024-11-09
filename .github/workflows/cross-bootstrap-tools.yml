@@ -37,6 +37,8 @@ jobs:
             target: amd64
           - target_arch: aarch64
             target: arm64
+          - target_arch: powerpc
+            target: powerpc
     steps:
       - uses: actions/checkout@v4
       - name: install packages (Ubuntu)
