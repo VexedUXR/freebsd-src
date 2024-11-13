@@ -6,64 +6,102 @@ on:
     branches: [ main, 'stable/14', 'stable/13' ]
     paths:
       - 'sys/**'
-      - 'stand/**'
 
-      - 'bin/**'
-      - 'sbin/**'
-      - 'usr.bin/**'
-      - 'usr.sbin/**'
-
-      # XXX What to build here?
       - 'Makefile'
       - 'Makefile.inc1'
 
       - '**/cross-bootstrap-tools.yml'
-
-      - '!**.[1-9]' # Ignore manpages
   pull_request:
     branches: [ main ]
     paths:
       - 'sys/**'
-      - 'stand/**'
 
-      - 'bin/**'
-      - 'sbin/**'
-      - 'usr.bin/**'
-      - 'usr.sbin/**'
-
-      # XXX What to build here?
       - 'Makefile'
       - 'Makefile.inc1'
 
       - '**/cross-bootstrap-tools.yml'
-
-      - '!**.[1-9]' # Ignore manpages
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  modified_files:
-    name: get modified files
+  setup:
+    name: setup
     runs-on: ubuntu-latest
     outputs:
-      changes: ${{ steps.changes.outputs.files }}
+      archs: ${{ steps.match.outputs.archs }}
+      exclude: ${{ steps.match.outputs.exclude }}
+      make_targets: ${{ steps.match.outputs.make_targets }}
     steps:
-      - uses: actions/checkout@v4
-      - name: get modified files
-        id: changes
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: paths filter (kernel)
+        uses: dorny/paths-filter@v3
+        id: kern_filter
+        with:
+          base: ${{ github.ref_name }}
+          filters: |
+            amd64:
+              - 'sys/amd64/**'
+            i386:
+              - 'sys/i386/**'
+            aarch64:
+              - 'sys/arm64/**'
+            armv7:
+              - 'sys/arm/**'
+            powerpc: &ppc
+              - 'sys/powerpc/**'
+            powerpc64:
+              - *ppc
+            powerpc64le:
+              - *ppc
+            riscv64:
+              - 'sys/riscv/**'
+            all:
+              - '**/cross-bootstrap-tools.yml'
+      - name: paths filter (world)
+        uses: dorny/paths-filter@v3
+        id: world_filter
+        with:
+          base: ${{ github.ref_name }}
+          filters: |
+            amd64:
+              - 'sys/amd64/**/*.h'
+            i386:
+              - 'sys/i386/**/*.h'
+            aarch64:
+              - 'sys/arm64/**/*.h'
+            armv7:
+              - 'sys/arm/**/*.h'
+            powerpc: &ppc
+              - 'sys/powerpc/**/*.h'
+            powerpc64:
+              - *ppc
+            powerpc64le:
+              - *ppc
+            riscv64:
+              - 'sys/riscv/**.h'
+            all:
+              - '**/cross-bootstrap-tools.yml'
+      - name: match paths
+        shell: python
+        id: match
         run: |
-          echo "files=$(git diff --name-only --diff-filter=ACMRT ${{ github.event.push.before }} ${{ github.sha }} | xargs)"
-          echo "files=$(git diff --name-only --diff-filter=ACMRT ${{ github.event.push.before }} ${{ github.sha }} | xargs)" >> $GITHUB_OUTPUT
+          import sys
+          sys.path.append(".github/workflows")
+
+          from jobs import match
+          match("${{ steps.kern_filter.outputs.all }}", "${{ steps.world_filter.outputs.all }}", ${{ steps.kern_filter.outputs.changes }}, ${{ steps.world_filter.outputs.changes }})
   build:
-    name: ${{ matrix.target_arch }} buildkernel on ${{ matrix.os }} (${{ matrix.compiler }})
+    name: ${{ matrix.arch.target_arch }} ${{ matrix.make_target }} on ${{ matrix.os }} (${{ matrix.compiler }})
     runs-on: ${{ matrix.os }}
-    needs: modified_files
+    needs: setup
     strategy:
       fail-fast: false
       matrix:
-        target_arch: [ amd64, aarch64, powerpc ]
+        make_target: ${{ fromJSON(needs.setup.outputs.make_targets) }}
+        arch: ${{ fromJSON(needs.setup.outputs.archs) }}
         os: [ ubuntu-22.04, ubuntu-24.04, macos-latest ]
         include:
           # TODO: both Ubuntu and macOS have bmake packages, we should try them instead of bootstrapping our own copy.
@@ -79,17 +117,9 @@ jobs:
             compiler: clang-18
             cross-bindir: /opt/homebrew/opt/llvm@18/bin
             pkgs: bmake libarchive llvm@18
-          - target_arch: amd64
-            target: amd64
-          - target_arch: aarch64
-            target: arm64
-          - target_arch: powerpc
-            target: powerpc
+        exclude: ${{ fromJSON(needs.setup.outputs.exclude) }}
     steps:
       - uses: actions/checkout@v4
-      - name: check modified files
-        run: |
-          echo ${{ needs.modified_files.outputs.changes }} && exit 1
       - name: install packages (Ubuntu)
         if: runner.os == 'Linux'
         run: |
@@ -106,13 +136,22 @@ jobs:
           if [ -n "${{ matrix.cross-bindir }}" ]; then
             echo "EXTRA_BUILD_ARGS=--cross-bindir=${{ matrix.cross-bindir }}" >> $GITHUB_ENV
           fi
+
+          if [ "${{ matrix.make_target }}" = "buildkernel" ]; then
+            args="KERNCONF=GENERIC NO_MODULES=yes"
+          elif [ "${{ matrix.make_target }}" = "buildworld" ]; then
+            args="WITHOUT_TOOLCHAIN=yes"
+          fi
+
           mkdir -p ../build
+          echo "EXTRA_MAKE_ARGS=$args" >> $GITHUB_ENV
           echo "MAKEOBJDIRPREFIX=${PWD%/*}/build" >> $GITHUB_ENV
           # heh, works on Linux/BSD/macOS ...
           echo "NPROC=`getconf _NPROCESSORS_ONLN 2>/dev/null || getconf NPROCESSORS_ONLN 2>/dev/null || echo 1`" >> $GITHUB_ENV
       - name: bootstrap bmake
-        run: ./tools/build/make.py --debug $EXTRA_BUILD_ARGS TARGET=${{ matrix.target }} TARGET_ARCH=${{ matrix.target_arch }} -n
+        run: ./tools/build/make.py --debug $EXTRA_BUILD_ARGS TARGET=${{ matrix.arch.target }} TARGET_ARCH=${{ matrix.arch.target_arch }} -n
       - name: make kernel-toolchain
-        run: ./tools/build/make.py --debug $EXTRA_BUILD_ARGS TARGET=${{ matrix.target }} TARGET_ARCH=${{ matrix.target_arch }} kernel-toolchain -s -j$NPROC -DWITH_DISK_IMAGE_TOOLS_BOOTSTRAP
-      - name: make buildkernel
-        run: ./tools/build/make.py --debug $EXTRA_BUILD_ARGS TARGET=${{ matrix.target }} TARGET_ARCH=${{ matrix.target_arch }} KERNCONF=GENERIC NO_MODULES=yes buildkernel -s -j$NPROC $EXTRA_MAKE_ARGS
+        if: ${{ matrix.make_target }} == buildkernel
+        run: ./tools/build/make.py --debug $EXTRA_BUILD_ARGS TARGET=${{ matrix.arch.target }} TARGET_ARCH=${{ matrix.arch.target_arch }} kernel-toolchain -s -j$NPROC -DWITH_DISK_IMAGE_TOOLS_BOOTSTRAP
+      - name: make ${{ matrix.make_target }}
+        run: ./tools/build/make.py --debug $EXTRA_BUILD_ARGS TARGET=${{ matrix.arch.target }} TARGET_ARCH=${{ matrix.arch.target_arch }} ${{ matrix.make_target }} -s -j$NPROC $EXTRA_MAKE_ARGS
