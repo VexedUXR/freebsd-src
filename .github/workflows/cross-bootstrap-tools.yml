@@ -1,19 +1,65 @@
-name: Cross-build Kernel
+name: Cross-build
 
+# XXX keep paths in sync
 on:
   push:
     branches: [ main, 'stable/14', 'stable/13' ]
+    paths:
+      - 'sys/**'
+      - 'stand/**'
+
+      - 'bin/**'
+      - 'sbin/**'
+      - 'usr.bin/**'
+      - 'usr.sbin/**'
+
+      # XXX What to build here?
+      - 'Makefile'
+      - 'Makefile.inc1'
+
+      - '**/cross-bootstrap-tools.yml'
+
+      - '!**.[1-9]' # Ignore manpages
   pull_request:
     branches: [ main ]
+    paths:
+      - 'sys/**'
+      - 'stand/**'
+
+      - 'bin/**'
+      - 'sbin/**'
+      - 'usr.bin/**'
+      - 'usr.sbin/**'
+
+      # XXX What to build here?
+      - 'Makefile'
+      - 'Makefile.inc1'
+
+      - '**/cross-bootstrap-tools.yml'
+
+      - '!**.[1-9]' # Ignore manpages
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  modified_files:
+    name: get modified files
+    runs-on: ubuntu-latest
+    outputs:
+      changes: ${{ steps.changes.outputs.files }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: get modified files
+        id: changes
+        run: |
+          echo "files=$(git diff --name-only --diff-filter=ACMRT ${{ github.event.push.before }} ${{ github.sha }} | xargs)"
+          echo "files=$(git diff --name-only --diff-filter=ACMRT ${{ github.event.push.before }} ${{ github.sha }} | xargs)" >> $GITHUB_OUTPUT
   build:
-    name: ${{ matrix.target_arch }} ${{ matrix.os }} (${{ matrix.compiler }})
+    name: ${{ matrix.target_arch }} buildkernel on ${{ matrix.os }} (${{ matrix.compiler }})
     runs-on: ${{ matrix.os }}
+    needs: modified_files
     strategy:
       fail-fast: false
       matrix:
@@ -41,6 +87,9 @@ jobs:
             target: powerpc
     steps:
       - uses: actions/checkout@v4
+      - name: check modified files
+        run: |
+          echo ${{ needs.modified_files.outputs.changes }} && exit 1
       - name: install packages (Ubuntu)
         if: runner.os == 'Linux'
         run: |
@@ -67,5 +116,3 @@ jobs:
         run: ./tools/build/make.py --debug $EXTRA_BUILD_ARGS TARGET=${{ matrix.target }} TARGET_ARCH=${{ matrix.target_arch }} kernel-toolchain -s -j$NPROC -DWITH_DISK_IMAGE_TOOLS_BOOTSTRAP
       - name: make buildkernel
         run: ./tools/build/make.py --debug $EXTRA_BUILD_ARGS TARGET=${{ matrix.target }} TARGET_ARCH=${{ matrix.target_arch }} KERNCONF=GENERIC NO_MODULES=yes buildkernel -s -j$NPROC $EXTRA_MAKE_ARGS
-      - name: make buildworld
-        run: ./tools/build/make.py --debug $EXTRA_BUILD_ARGS TARGET=${{ matrix.target }} TARGET_ARCH=${{ matrix.target_arch }} WITHOUT_TOOLCHAIN=yes buildworld -s -j$NPROC $EXTRA_MAKE_ARGS
