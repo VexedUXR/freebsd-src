@@ -33,6 +33,10 @@
 #ifndef __MACHINE_COUNTER_H__
 #define __MACHINE_COUNTER_H__
 
+/*
+ * TEST
+ */
+
 #include <sys/pcpu.h>
 #include <sys/kassert.h>
 

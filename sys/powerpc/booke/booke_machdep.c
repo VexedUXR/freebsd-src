@@ -148,6 +148,10 @@
 #define debugf(fmt, args...)
 #endif
 
+/*
+ * TEST
+ */
+
 extern unsigned char _etext[];
 extern unsigned char _edata[];
 extern unsigned char __bss_start[];
