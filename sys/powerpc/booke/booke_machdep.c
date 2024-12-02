@@ -319,7 +319,7 @@ booke_check_for_fdt(uint32_t arg1, vm_offset_t *dtbp)
 	ptr = (void *)pmap_early_io_map(arg1, fdt_size); 
 	*dtbp = (vm_offset_t)ptr;
 
-	return (0);
+	return 0;
 }
 
 uintptr_t
