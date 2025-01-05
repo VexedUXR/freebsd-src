@@ -1,0 +1,89 @@
+name: Checklist
+
+on:
+  pull_request:
+    types: [ opened, reopened, edited, synchronize ]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  checklist:
+    name: commit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          # A Javascript function
+          script: |
+            const commits = await github.paginate(github.rest.pulls.listCommits, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+
+            let checklist = {};
+            let comment_id = -1;
+            /*
+             * Preappend the comment with a unique
+             * tag so we can find it later.
+             */
+            const tag = "<!--SomethingUnique-->";
+            const addToChecklist = (msg, sha) => {
+              if (!checklist[msg])
+                checklist[msg] = [];
+              checklist[msg].push(sha);
+            }
+
+            for (const commit of commits) {
+              const sob_lines = commit.commit.message.match(/^[^\S\r\n]*signed-off-by:./gim);
+
+              if (sob_lines == null && !commit.commit.author.email.endsWith("FreeBSD.org"))
+                addToChecklist("Missing Signed-off-by lines", commit.sha);
+              else {
+                for (const line of sob_lines) {
+                  if (!line.endsWith("Signed-off-by: "))
+                    addToChecklist("Expected \"Signed-off-by: \", got \"" + line + "\"", commit.sha);
+                }
+              }
+
+              if (commit.commit.author.email.includes("noreply"))
+                addToChecklist("Real email address is needed", commit.sha);
+            }
+
+            /* Check if we've commented before. */
+            for (const comment of comments) {
+              if (comment.body.startsWith(tag)) {
+                comment_id = comment.id;
+                break;
+              }
+            }
+
+            if (Object.keys(checklist).length != 0) {
+              let msg = tag + "Problems found:\n";
+              let comment_func = comment_id == -1 ? github.rest.issues.createComment : github.rest.issues.updateComment;
+
+              for (const c in checklist)
+                msg += "- " + c + "<sup>" + checklist[c].join(", ") + "</sup>\n";
+              console.log(msg);
+
+              comment_func({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: msg,
+                ...(comment_id == -1 ? {issue_number: context.issue.number} : {comment_id: comment_id})
+              });
+            } else if (comment_id != -1) {
+              github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: comment_id,
+                body: "All issues resolved."
+              });
+            }
