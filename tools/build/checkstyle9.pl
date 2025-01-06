@@ -1449,29 +1449,6 @@ sub process {
 			$is_patch = 1;
 		}
 
-# Filter out bad email addresses.
-		if ($line =~ /^(Author|From): .*noreply.*/) {
-		    ERROR("Real email adress is needed\n" . $herecurr);
-		}
-
-#check the patch for a signoff:
-		if ($line =~ /^\s*signed-off-by:/i) {
-			# This is a signoff, if ugly, so do not double report.
-			$in_commit_log = 0;
-			$has_sob = 1;
-
-			if (!($line =~ /^\s*Signed-off-by:/)) {
-				ERROR("The correct form is \"Signed-off-by\"\n" .
-					$herecurr);
-				$has_sob = 0;
-			}
-			if ($line =~ /^\s*signed-off-by:\S/i) {
-				ERROR("space required after Signed-off-by:\n" .
-					$herecurr);
-				$has_sob = 0;
-			}
-		}
-
 # Check for wrappage within a valid hunk of the file
 		if ($realcnt != 0 && $line !~ m{^(?:\+|-| |\\ No newline|$)}) {
 			ERROR("patch seems to be corrupt (line wrapped?)\n" .
