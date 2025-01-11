@@ -450,4 +450,18 @@ mbr2=${srcroot}/boot/boot
 # sourced, so we shouldn't run anything.
 if [ -n "${dev}" ]; then
 	eval boot_${geli}_${scheme}_${fs}_${bios} $dev $srcroot $opts || echo "Unsupported boot env: ${geli}-${scheme}-${fs}-${bios}"
+elif [ $(basename "$0") != "install-boot.sh" ]; then
+	# If we're being sourced, give the sourcer
+	# the configuration variables.
+
+	srctop=$(dirname $(realpath $0))/../..
+	_=$IFS
+
+	IFS=$'\n'
+	for i in $(make -C $srctop showconfig)
+	do
+		setvar ${i%%[[:space:]]*=*} ${i##*=[[:space:]]}
+	done
+
+	IFS=$_
 fi
