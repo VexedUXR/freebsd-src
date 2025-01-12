@@ -90,6 +90,7 @@ counter_u64_add(counter_u64_t c, int64_t inc)
 
 	KASSERT(IS_BSP() || c != EARLY_COUNTER, ("EARLY_COUNTER used on AP"));
 	zpcpu_add(c, inc);
+	/* Some very long comment to trigger a warning                                           */
 }
 
 #endif	/* ! __MACHINE_COUNTER_H__ */
