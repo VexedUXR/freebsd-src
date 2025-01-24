@@ -58,7 +58,8 @@ jobs:
                 let author_signed = false;
                 for (const line of sob_lines) {
                   if (!line.includes("Signed-off-by: "))
-                    addToChecklist("Expected `Signed-off-by: `, got `" + line + "`", commit.sha);
+                    /* Only display the part we care about. */
+                    addToChecklist("Expected `Signed-off-by: `, got `" + line.match(/^[^\S\r\n]*signed-off-by:./i) + "`", commit.sha);
                   if (line.includes(commit.commit.author.email))
                     author_signed = true;
                 }
