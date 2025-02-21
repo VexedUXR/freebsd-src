@@ -66,6 +66,9 @@ CODE {
 
 HEADER {
 	#include <dev/ofw/openfirm.h>
+#ifndef INTRNG
+	#include <sys/interrupt.h>
+#endif
 };
 
 #
@@ -185,3 +188,19 @@ METHOD int pin_config_32 {
 	uint32_t num_pins;
 	uint32_t *pin_flags;
 } DEFAULT gpio_default_nosupport;
+
+#ifndef INTRNG
+# XXX Write here what these do.
+METHOD int setup_intr {
+	device_t dev;
+	uint32_t pin;
+	uint32_t flags;
+	driver_intr_t handler;
+	void *arg;
+};
+
+METHOD int teardown_intr {
+	device_t dev;
+	uint32_t pin;
+};
+#endif

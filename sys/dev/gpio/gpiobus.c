@@ -32,6 +32,9 @@
 #include <sys/gpio.h>
 #ifdef INTRNG
 #include <sys/intr.h>
+#else
+#include <sys/proc.h>
+#include <sys/interrupt.h>
 #endif
 #include <sys/kernel.h>
 #include <sys/malloc.h>
@@ -89,7 +92,6 @@ static int gpiobus_pin_toggle(device_t, device_t, uint32_t);
  * Also, this function must be changed when interrupt configuration
  * data will be moved into struct resource.
  */
-#ifdef INTRNG
 
 struct resource *
 gpio_alloc_intr_resource(device_t consumer_dev, int *rid, u_int alloc_flags,
@@ -99,31 +101,35 @@ gpio_alloc_intr_resource(device_t consumer_dev, int *rid, u_int alloc_flags,
 	struct intr_map_data_gpio *gpio_data;
 	struct resource *res;
 
+#ifdef INTRNG
 	gpio_data = (struct intr_map_data_gpio *)intr_alloc_map_data(
 	    INTR_MAP_DATA_GPIO, sizeof(*gpio_data), M_WAITOK | M_ZERO);
 	gpio_data->gpio_pin_num = pin->pin;
 	gpio_data->gpio_pin_flags = pin->flags;
+#else
+	/* XXX Where is this freed? */
+	gpio_data = malloc(sizeof(*gpio_data), M_DEVBUF, M_WAITOK);
+#endif
 	gpio_data->gpio_intr_mode = intr_mode;
 
+#ifdef INTRNG
 	irq = intr_map_irq(pin->dev, 0, (struct intr_map_data *)gpio_data);
+#else
+	irq = pin->pin;
+#endif
 	res = bus_alloc_resource(consumer_dev, SYS_RES_IRQ, rid, irq, irq, 1,
 	    alloc_flags);
 	if (res == NULL) {
+#ifdef INTRNG
 		intr_free_intr_map_data((struct intr_map_data *)gpio_data);
+#else
+		free(gpio_data, M_DEVBUF);
+#endif
 		return (NULL);
 	}
 	rman_set_virtual(res, gpio_data);
 	return (res);
 }
-#else
-struct resource *
-gpio_alloc_intr_resource(device_t consumer_dev, int *rid, u_int alloc_flags,
-    gpio_pin_t pin, uint32_t intr_mode)
-{
-
-	return (NULL);
-}
-#endif
 
 int
 gpio_check_flags(uint32_t caps, uint32_t flags)
@@ -331,14 +337,19 @@ gpiobus_init_softc(device_t dev)
 	sc->sc_dev = device_get_parent(dev);
 	sc->sc_intr_rman.rm_type = RMAN_ARRAY;
 	sc->sc_intr_rman.rm_descr = "GPIO Interrupts";
-	if (rman_init(&sc->sc_intr_rman) != 0 ||
-	    rman_manage_region(&sc->sc_intr_rman, 0, ~0) != 0)
-		panic("%s: failed to set up rman.", __func__);
 
 	if (GPIO_PIN_MAX(sc->sc_dev, &sc->sc_npins) != 0)
 		return (ENXIO);
 
 	KASSERT(sc->sc_npins >= 0, ("GPIO device with no pins"));
+
+	if (rman_init(&sc->sc_intr_rman) != 0 ||
+#ifdef INTRNG
+	    rman_manage_region(&sc->sc_intr_rman, 0, ~0) != 0)
+#else
+	    rman_manage_region(&sc->sc_intr_rman, 0, sc->sc_npins) != 0)
+#endif
+		panic("%s: failed to set up rman.", __func__);
 
 	/* Pins = GPIO_PIN_MAX() + 1 */
 	sc->sc_npins++;
@@ -584,6 +595,10 @@ gpiobus_detach(device_t dev)
 		for (i = 0; i < sc->sc_npins; i++) {
 			if (sc->sc_pins[i].name != NULL)
 				free(sc->sc_pins[i].name, M_DEVBUF);
+#ifndef INTRNG
+			if (sc->sc_pins[i].ev != NULL)
+				GPIO_TEARDOWN_INTR(sc->sc_dev, i);
+#endif
 			sc->sc_pins[i].name = NULL;
 		}
 		free(sc->sc_pins, M_DEVBUF);
@@ -1012,6 +1027,88 @@ gpiobus_pin_setname(device_t dev, uint32_t pin, const char *name)
 	return (0);
 }
 
+#ifndef INTRNG
+static void
+gpiobus_intr(void *arg)
+{
+	struct intr_event *ev = arg;
+
+	if (intr_event_handle(ev, curthread->td_intr_frame) != 0)
+		printf("%s: %s: stray interrupt\n", __func__, ev->ie_name);
+}
+
+static int
+gpiobus_setup_intr(device_t dev, device_t child, struct resource *irq,
+    int flags, driver_filter_t *filter, driver_intr_t *ithread,
+    void *arg, void **cookiep)
+{
+	struct gpiobus_softc *sc;
+	uint32_t pin;
+	int ret;
+
+	sc = GPIOBUS_SOFTC(dev);
+	pin = rman_get_start(irq);
+
+	if (pin >= sc->sc_npins)
+		return (EINVAL);
+
+	GPIOBUS_LOCK(sc);
+	if (sc->sc_pins[pin].ev == NULL) {
+		struct intr_map_data_gpio *gpio_data;
+		struct intr_event *ev;
+
+		GPIOBUS_UNLOCK(sc);
+		ret = intr_event_create(&ev, NULL, 0, pin,
+		    NULL, NULL, NULL, NULL, "%s-%d", device_get_nameunit(dev),
+		    pin);
+		if (ret != 0)
+			return (ret);
+
+		GPIOBUS_LOCK(sc);
+		sc->sc_pins[pin].ev = ev;
+
+		gpio_data = rman_get_virtual(irq);
+		ret = GPIO_SETUP_INTR(sc->sc_dev, pin,
+		    gpio_data->gpio_intr_mode, gpiobus_intr,
+		    sc->sc_pins[pin].ev);
+		if (ret != 0) {
+			GPIOBUS_UNLOCK(sc);
+			return (ret);
+		}
+	}
+	GPIOBUS_UNLOCK(sc);
+
+	/* XXX
+	 * Maybe use a better name here
+	 */
+	ret = intr_event_add_handler(sc->sc_pins[pin].ev,
+	    device_get_nameunit(dev), filter, ithread, arg,
+	    intr_priority(flags), flags, cookiep);
+
+	return (ret);
+}
+
+static int
+gpiobus_teardown_intr(device_t dev, device_t child, struct resource *irq,
+    void *cookie)
+{
+	struct gpiobus_softc *sc;
+	uint32_t pin;
+
+	sc = GPIOBUS_SOFTC(dev);
+	pin = rman_get_start(irq);
+
+	if (pin >= sc->sc_npins)
+		return (EINVAL);
+
+	return (intr_event_remove_handler(cookie));
+	/* XXX
+	 * Check if there are no hanlders left and
+	 * call GPIO_TEARDOWN_INTR?
+	 */
+}
+#endif
+
 static device_method_t gpiobus_methods[] = {
 	/* Device interface */
 	DEVMETHOD(device_probe,		gpiobus_probe),
@@ -1022,9 +1119,14 @@ static device_method_t gpiobus_methods[] = {
 	DEVMETHOD(device_resume,	gpiobus_resume),
 
 	/* Bus interface */
+#ifdef INTNRG
 	DEVMETHOD(bus_setup_intr,	bus_generic_setup_intr),
 	DEVMETHOD(bus_config_intr,	bus_generic_config_intr),
 	DEVMETHOD(bus_teardown_intr,	bus_generic_teardown_intr),
+#else
+	DEVMETHOD(bus_setup_intr,	gpiobus_setup_intr),
+	DEVMETHOD(bus_teardown_intr,	gpiobus_teardown_intr),
+#endif
 	DEVMETHOD(bus_delete_resource,	bus_generic_rl_delete_resource),
 	DEVMETHOD(bus_get_resource,	bus_generic_rl_get_resource),
 	DEVMETHOD(bus_set_resource,	bus_generic_rl_set_resource),

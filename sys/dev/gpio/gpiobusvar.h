@@ -42,6 +42,8 @@
 
 #ifdef	INTRNG
 #include <sys/intr.h>
+#else
+#include <sys/interrupt.h>
 #endif
 
 #include "gpio_if.h"
@@ -69,18 +71,19 @@
 
 struct gpiobus_pin_data
 {
+	struct intr_event *ev;		/* pin's interrupt event, if any. */
 	int		mapped;		/* pin is mapped/reserved. */
 	char		*name;		/* pin name. */
 };
 
-#ifdef INTRNG
 struct intr_map_data_gpio {
+#ifdef INTRNG
 	struct intr_map_data	hdr;
 	u_int			gpio_pin_num;
 	u_int			gpio_pin_flags;
+#endif
 	u_int		 	gpio_intr_mode;
 };
-#endif
 
 struct gpiobus_softc
 {
