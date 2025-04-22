@@ -282,7 +282,7 @@ static char *bytgpio_gpio_ids[] = { "INT33FC", NULL };
 
 #define	SUS_PINS	nitems(bytgpio_sus_pins)
 
-#define	BYGPIO_PIN_REGISTER(sc, pin, r)	((sc)->sc_pinpad_map[(pin)].reg * 16 + (r))
+#define	BYTGPIO_PIN_REGISTER(sc, pin, r)	((sc)->sc_pinpad_map[(pin)].reg * 16 + (r))
 #define	BYTGPIO_PCONF0		0x0000
 #define		BYTGPIO_PCONF0_FUNC_MASK	7
 #define	BYTGPIO_PAD_VAL		0x0008
@@ -381,7 +381,7 @@ bytgpio_pin_getflags(device_t dev, uint32_t pin, uint32_t *flags)
 
 	/* Get the current pin state */
 	BYTGPIO_LOCK(sc);
-	reg = BYGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PAD_VAL);
+	reg = BYTGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PAD_VAL);
 	val = bytgpio_read_4(sc, reg);
 	if ((val & BYTGPIO_PAD_VAL_I_OUTPUT_ENABLED) == 0)
 		*flags |= GPIO_PIN_OUTPUT;
@@ -426,7 +426,7 @@ bytgpio_pin_setflags(device_t dev, uint32_t pin, uint32_t flags)
 
 	/* Set the GPIO mode and state */
 	BYTGPIO_LOCK(sc);
-	reg = BYGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PAD_VAL);
+	reg = BYTGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PAD_VAL);
 	val = bytgpio_read_4(sc, reg);
 	val = val | BYTGPIO_PAD_VAL_DIR_MASK;
 	if (flags & GPIO_PIN_INPUT)
@@ -469,7 +469,7 @@ bytgpio_pin_set(device_t dev, uint32_t pin, unsigned int value)
 		return (EINVAL);
 
 	BYTGPIO_LOCK(sc);
-	reg = BYGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PAD_VAL);
+	reg = BYTGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PAD_VAL);
 	val = bytgpio_read_4(sc, reg);
 	if (value == GPIO_PIN_LOW)
 		val = val & ~BYTGPIO_PAD_VAL_LEVEL;
@@ -499,7 +499,7 @@ bytgpio_pin_get(device_t dev, uint32_t pin, unsigned int *value)
 	}
 
 	BYTGPIO_LOCK(sc);
-	reg = BYGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PAD_VAL);
+	reg = BYTGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PAD_VAL);
 	/*
 	 * And read actual value
 	 */
@@ -528,7 +528,7 @@ bytgpio_pin_toggle(device_t dev, uint32_t pin)
 
 	/* Toggle the pin */
 	BYTGPIO_LOCK(sc);
-	reg = BYGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PAD_VAL);
+	reg = BYTGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PAD_VAL);
 	val = bytgpio_read_4(sc, reg);
 	val = val ^ BYTGPIO_PAD_VAL_LEVEL;
 	bytgpio_write_4(sc, reg, val);
@@ -603,7 +603,7 @@ bytgpio_attach(device_t dev)
 	}
 
 	for (pin = 0; pin < sc->sc_npins; pin++) {
-	    reg = BYGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PCONF0);
+	    reg = BYTGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PCONF0);
 	    val = bytgpio_read_4(sc, reg);
 	    sc->sc_pad_funcs[pin] = val & BYTGPIO_PCONF0_FUNC_MASK;
 	}
