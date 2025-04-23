@@ -285,6 +285,8 @@ static char *bytgpio_gpio_ids[] = { "INT33FC", NULL };
 #define	BYTGPIO_PIN_REGISTER(sc, pin, r)	((sc)->sc_pinpad_map[(pin)].reg * 16 + (r))
 #define	BYTGPIO_PCONF0		0x0000
 #define		BYTGPIO_PCONF0_FUNC_MASK	7
+#define		BYTGPIO_PCONF0_PULLDOWN	(1 << 7)
+#define		BYTGPIO_PCONF0_PULLUP	(1 << 8)
 #define	BYTGPIO_PAD_VAL		0x0008
 #define		BYTGPIO_PAD_VAL_LEVEL		(1 << 0)	
 #define		BYTGPIO_PAD_VAL_I_OUTPUT_ENABLED	(1 << 1)
@@ -360,7 +362,8 @@ bytgpio_pin_getcaps(device_t dev, uint32_t pin, uint32_t *caps)
 
 	*caps = 0;
 	if (bytgpio_pad_is_gpio(sc, pin))
-		*caps = GPIO_PIN_INPUT | GPIO_PIN_OUTPUT;
+		*caps = GPIO_PIN_INPUT | GPIO_PIN_OUTPUT | GPIO_PIN_PULLDOWN |
+		    GPIO_PIN_PULLUP;
 
 	return (0);
 }
@@ -391,6 +394,13 @@ bytgpio_pin_getflags(device_t dev, uint32_t pin, uint32_t *flags)
 	 */
 	else if ((val & BYTGPIO_PAD_VAL_I_INPUT_ENABLED) == 0)
 		*flags |= GPIO_PIN_INPUT;
+
+	reg = BYTGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PCONF0);
+	val = bytgpio_read_4(sc, reg);
+	if (val & BYTGPIO_PCONF0_PULLDOWN)
+		*flags |= GPIO_PIN_PULLDOWN;
+	else if (val & BYTGPIO_PCONF0_PULLUP)
+		*flags |= GPIO_PIN_PULLUP;
 	BYTGPIO_UNLOCK(sc);
 
 	return (0);
@@ -408,20 +418,14 @@ bytgpio_pin_setflags(device_t dev, uint32_t pin, uint32_t flags)
 		return (EINVAL);
 
 	if (bytgpio_pad_is_gpio(sc, pin))
-		allowed = GPIO_PIN_INPUT | GPIO_PIN_OUTPUT;
+		allowed = GPIO_PIN_INPUT | GPIO_PIN_OUTPUT | GPIO_PIN_PULLDOWN |
+		    GPIO_PIN_PULLUP;
 	else
 		allowed = 0;
 
-	/* 
-	 * Only directtion flag allowed
-	 */
 	if (flags & ~allowed)
 		return (EINVAL);
-
-	/* 
-	 * Not both directions simultaneously
-	 */
-	if ((flags & allowed) == allowed)
+	if (gpio_check_flags(allowed, flags) != 0)
 		return (EINVAL);
 
 	/* Set the GPIO mode and state */
@@ -433,6 +437,15 @@ bytgpio_pin_setflags(device_t dev, uint32_t pin, uint32_t flags)
 		val = val & ~BYTGPIO_PAD_VAL_I_INPUT_ENABLED;
 	if (flags & GPIO_PIN_OUTPUT)
 		val = val & ~BYTGPIO_PAD_VAL_I_OUTPUT_ENABLED;
+	bytgpio_write_4(sc, reg, val);
+
+	reg = BYTGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PCONF0);
+	val = bytgpio_read_4(sc, reg);
+	val &= ~(BYTGPIO_PCONF0_PULLDOWN | BYTGPIO_PCONF0_PULLUP);
+	if (flags & GPIO_PIN_PULLDOWN)
+		val |= BYTGPIO_PCONF0_PULLDOWN;
+	else if (flags & GPIO_PIN_PULLUP)
+		val |= BYTGPIO_PCONF0_PULLUP;
 	bytgpio_write_4(sc, reg, val);
 	BYTGPIO_UNLOCK(sc);
 
