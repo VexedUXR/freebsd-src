@@ -44,8 +44,6 @@
 #include <dev/acpica/acpivar.h>
 #include <dev/gpio/gpiobusvar.h>
 
-#include "gpio_if.h"
-
 /**
  *	Macros for driver mutex locking
  */
