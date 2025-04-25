@@ -34,6 +34,7 @@
 #include <sys/module.h>
 #include <sys/proc.h>
 #include <sys/rman.h>
+#include <sys/interrupt.h>
 
 #include <machine/bus.h>
 #include <machine/resource.h>
@@ -51,10 +52,12 @@
 #define	BYTGPIO_UNLOCK(_sc)		mtx_unlock_spin(&(_sc)->sc_mtx)
 #define	BYTGPIO_LOCK_INIT(_sc)		\
 	mtx_init(&_sc->sc_mtx, device_get_nameunit((_sc)->sc_dev), \
-	    "bytgpio", MTX_SPIN)
+	    "bytgpio", MTX_SPIN | MTX_RECURSE)
 #define	BYTGPIO_LOCK_DESTROY(_sc)	mtx_destroy(&(_sc)->sc_mtx)
 #define	BYTGPIO_ASSERT_LOCKED(_sc)	mtx_assert(&(_sc)->sc_mtx, MA_OWNED)
 #define	BYTGPIO_ASSERT_UNLOCKED(_sc)	mtx_assert(&(_sc)->sc_mtx, MA_NOTOWNED)
+#define	BYTGPIO_ASSERT_NOTRECURSED(_sc)	mtx_assert(&(_sc)->sc_mtx, \
+    MA_OWNED | MA_NOTRECURSED)
 
 struct pinmap_info {
     int reg;
@@ -72,12 +75,17 @@ struct bytgpio_softc {
 	device_t		sc_busdev;
 	struct mtx		sc_mtx;
 	int			sc_mem_rid;
+	int			sc_irq_rid;
+	void			*sc_irq_cookie;
 	struct resource		*sc_mem_res;
+	struct resource		*sc_irq_res;
 	int			sc_npins;
 	const char*		sc_bank_prefix;
 	const struct pinmap_info	*sc_pinpad_map;
-	/* List of current functions for pads shared by GPIO */
-	int			*sc_pad_funcs;
+	struct {
+		bool masked;
+		uint32_t flags;
+	} *sc_pins;
 };
 
 static int	bytgpio_probe(device_t dev);
@@ -281,15 +289,28 @@ static char *bytgpio_gpio_ids[] = { "INT33FC", NULL };
 #define	SUS_PINS	nitems(bytgpio_sus_pins)
 
 #define	BYTGPIO_PIN_REGISTER(sc, pin, r)	((sc)->sc_pinpad_map[(pin)].reg * 16 + (r))
+#define	BYTGPIO_IRQ_TS(n)			(0x800 + n * 4)
 #define	BYTGPIO_PCONF0		0x0000
 #define		BYTGPIO_PCONF0_FUNC_MASK	7
 #define		BYTGPIO_PCONF0_PULLDOWN	(1 << 7)
 #define		BYTGPIO_PCONF0_PULLUP	(1 << 8)
+		/* Interrupt flags */
+#define		BYTGPIO_PCONF0_LEVEL	(1 << 24)
+#define		BYTGPIO_PCONF0_RISING_EDGE	(1 << 25)
+#define		BYTGPIO_PCONF0_FALLING_EDGE	(1 << 26)
+#define		BYTGPIO_PCONF0_INTR_MASK	(BYTGPIO_PCONF0_LEVEL | \
+		    BYTGPIO_PCONF0_RISING_EDGE | BYTGPIO_PCONF0_FALLING_EDGE)
 #define	BYTGPIO_PAD_VAL		0x0008
 #define		BYTGPIO_PAD_VAL_LEVEL		(1 << 0)	
 #define		BYTGPIO_PAD_VAL_I_OUTPUT_ENABLED	(1 << 1)
 #define		BYTGPIO_PAD_VAL_I_INPUT_ENABLED	(1 << 2)
 #define		BYTGPIO_PAD_VAL_DIR_MASK		(3 << 1)
+
+#define	BYTGPIO_CAPS	(GPIO_PIN_INPUT	| GPIO_PIN_OUTPUT | \
+			 GPIO_PIN_PULLDOWN | GPIO_PIN_PULLUP | \
+			 GPIO_INTR_LEVEL_HIGH | GPIO_INTR_LEVEL_LOW | \
+			 GPIO_INTR_EDGE_RISING | GPIO_INTR_EDGE_FALLING | \
+			 GPIO_INTR_EDGE_BOTH)
 
 static inline uint32_t
 bytgpio_read_4(struct bytgpio_softc *sc, bus_size_t off)
@@ -343,7 +364,8 @@ static bool
 bytgpio_pad_is_gpio(struct bytgpio_softc *sc, int pin)
 {
 	if ((sc->sc_pinpad_map[pin].pad_func == PADCONF_FUNC_ANY) ||
-	    (sc->sc_pad_funcs[pin] == sc->sc_pinpad_map[pin].pad_func))
+	    ((sc->sc_pins[pin].flags & BYTGPIO_PCONF0_FUNC_MASK) ==
+	      sc->sc_pinpad_map[pin].pad_func))
 		return (true);
 	else
 		return (false);
@@ -360,8 +382,7 @@ bytgpio_pin_getcaps(device_t dev, uint32_t pin, uint32_t *caps)
 
 	*caps = 0;
 	if (bytgpio_pad_is_gpio(sc, pin))
-		*caps = GPIO_PIN_INPUT | GPIO_PIN_OUTPUT | GPIO_PIN_PULLDOWN |
-		    GPIO_PIN_PULLUP;
+		*caps = BYTGPIO_CAPS;
 
 	return (0);
 }
@@ -382,6 +403,7 @@ bytgpio_pin_getflags(device_t dev, uint32_t pin, uint32_t *flags)
 
 	/* Get the current pin state */
 	BYTGPIO_LOCK(sc);
+	BYTGPIO_ASSERT_NOTRECURSED(sc);
 	reg = BYTGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PAD_VAL);
 	val = bytgpio_read_4(sc, reg);
 	if ((val & BYTGPIO_PAD_VAL_I_OUTPUT_ENABLED) == 0)
@@ -416,8 +438,7 @@ bytgpio_pin_setflags(device_t dev, uint32_t pin, uint32_t flags)
 		return (EINVAL);
 
 	if (bytgpio_pad_is_gpio(sc, pin))
-		allowed = GPIO_PIN_INPUT | GPIO_PIN_OUTPUT | GPIO_PIN_PULLDOWN |
-		    GPIO_PIN_PULLUP;
+		allowed = BYTGPIO_CAPS & ~GPIO_INTR_MASK;
 	else
 		allowed = 0;
 
@@ -428,6 +449,7 @@ bytgpio_pin_setflags(device_t dev, uint32_t pin, uint32_t flags)
 
 	/* Set the GPIO mode and state */
 	BYTGPIO_LOCK(sc);
+	BYTGPIO_ASSERT_NOTRECURSED(sc);
 	reg = BYTGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PAD_VAL);
 	val = bytgpio_read_4(sc, reg);
 	val = val | BYTGPIO_PAD_VAL_DIR_MASK;
@@ -480,6 +502,7 @@ bytgpio_pin_set(device_t dev, uint32_t pin, unsigned int value)
 		return (EINVAL);
 
 	BYTGPIO_LOCK(sc);
+	BYTGPIO_ASSERT_NOTRECURSED(sc);
 	reg = BYTGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PAD_VAL);
 	val = bytgpio_read_4(sc, reg);
 	if (value == GPIO_PIN_LOW)
@@ -510,6 +533,7 @@ bytgpio_pin_get(device_t dev, uint32_t pin, unsigned int *value)
 	}
 
 	BYTGPIO_LOCK(sc);
+	BYTGPIO_ASSERT_NOTRECURSED(sc);
 	reg = BYTGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PAD_VAL);
 	/*
 	 * And read actual value
@@ -539,6 +563,7 @@ bytgpio_pin_toggle(device_t dev, uint32_t pin)
 
 	/* Toggle the pin */
 	BYTGPIO_LOCK(sc);
+	BYTGPIO_ASSERT_NOTRECURSED(sc);
 	reg = BYTGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PAD_VAL);
 	val = bytgpio_read_4(sc, reg);
 	val = val ^ BYTGPIO_PAD_VAL_LEVEL;
@@ -546,6 +571,159 @@ bytgpio_pin_toggle(device_t dev, uint32_t pin)
 	BYTGPIO_UNLOCK(sc);
 
 	return (0);
+}
+
+static int
+bytgpio_intr(void *arg)
+{
+	struct bytgpio_softc *sc = arg;
+
+	BYTGPIO_LOCK(sc);
+	BYTGPIO_ASSERT_NOTRECURSED(sc);
+
+	/* Each IRQ_TS register holds the status of 32 pins. */
+	for (int i = 0; i < howmany(sc->sc_npins, 32); i++) {
+		uint32_t reg = BYTGPIO_IRQ_TS(i);
+		uint32_t val = bytgpio_read_4(sc, reg);
+
+		for (uint32_t pin = i * 32; val != 0 && pin < sc->sc_npins;
+		     val >>= 1, pin++) {
+			if (!bytgpio_pad_is_gpio(sc, pin))
+				continue;
+			if ((val & 1) && !sc->sc_pins[pin].masked)
+				gpiobus_handle_intr(sc->sc_busdev, pin);
+		}
+
+		/* Clear IRQ status. */
+		bytgpio_write_4(sc, reg, 1);
+	}
+
+	BYTGPIO_UNLOCK(sc);
+	return (FILTER_HANDLED);
+}
+
+#define BYTGPIO_ASSERT_PIN_OK(sc, pin) \
+	KASSERT(bytgpio_valid_pin(sc, pin) == 0, \
+	    ("%s: invalid pin 0x%x", __func__, pin)); \
+	if (!bytgpio_pad_is_gpio(sc, pin)) \
+		panic("%s: pin 0x%x is not configured to be used as GPIO", \
+		    __func__, pin)
+
+
+static void
+bytgpio_config_intr(device_t dev, uint32_t pin, uint32_t intr_mode)
+{
+	struct bytgpio_softc *sc;
+
+	sc = device_get_softc(dev);
+	BYTGPIO_LOCK(sc);
+	BYTGPIO_ASSERT_NOTRECURSED(sc);
+	BYTGPIO_ASSERT_PIN_OK(sc, pin);
+
+	/* XXX Not sure about this. */
+	if (sc->sc_pins[pin].flags & BYTGPIO_PCONF0_INTR_MASK) {
+		device_printf(dev, "WARNING: pin 0x%x is already configured\n",
+		    pin);
+		sc->sc_pins[pin].flags &= ~BYTGPIO_PCONF0_INTR_MASK;
+	}
+
+	switch (intr_mode) {
+	case GPIO_INTR_LEVEL_LOW:
+		sc->sc_pins[pin].flags |= BYTGPIO_PCONF0_LEVEL |
+		    BYTGPIO_PCONF0_FALLING_EDGE;
+		break;
+	case GPIO_INTR_LEVEL_HIGH:
+		sc->sc_pins[pin].flags |= BYTGPIO_PCONF0_LEVEL |
+		    BYTGPIO_PCONF0_RISING_EDGE;
+		break;
+	case GPIO_INTR_EDGE_BOTH:
+		sc->sc_pins[pin].flags |= BYTGPIO_PCONF0_FALLING_EDGE |
+		    BYTGPIO_PCONF0_RISING_EDGE;
+		break;
+	case GPIO_INTR_EDGE_RISING:
+		sc->sc_pins[pin].flags |= BYTGPIO_PCONF0_RISING_EDGE;
+		break;
+	case GPIO_INTR_EDGE_FALLING:
+		sc->sc_pins[pin].flags |= BYTGPIO_PCONF0_FALLING_EDGE;
+		break;
+	default:
+		panic("%s: invalid intr mode: 0x%x", __func__, intr_mode);
+	}
+
+	BYTGPIO_UNLOCK(sc);
+}
+
+static void
+bytgpio_enable_intr(device_t dev, uint32_t pin)
+{
+	struct bytgpio_softc *sc;
+	uint32_t reg, val;
+
+	sc = device_get_softc(dev);
+	BYTGPIO_LOCK(sc);
+	BYTGPIO_ASSERT_NOTRECURSED(sc);
+	BYTGPIO_ASSERT_PIN_OK(sc, pin);
+
+	reg = BYTGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PCONF0);
+	val = bytgpio_read_4(sc, reg);
+
+	KASSERT((val & BYTGPIO_PCONF0_INTR_MASK) == 0,
+	    ("%s: interrupt already enabled on pin 0x%x", __func__, pin));
+	KASSERT((sc->sc_pins[pin].flags & BYTGPIO_PCONF0_INTR_MASK) != 0,
+	    ("%s: interrupt not configured on pin 0x%x", __func__, pin));
+
+	val |= sc->sc_pins[pin].flags & BYTGPIO_PCONF0_INTR_MASK;
+	bytgpio_write_4(sc, reg, val);
+
+	BYTGPIO_UNLOCK(sc);
+}
+
+static void
+bytgpio_disable_intr(device_t dev, uint32_t pin)
+{
+	struct bytgpio_softc *sc;
+	uint32_t reg, val;
+
+	sc = device_get_softc(dev);
+	BYTGPIO_LOCK(sc);
+	BYTGPIO_ASSERT_NOTRECURSED(sc);
+	BYTGPIO_ASSERT_PIN_OK(sc, pin);
+
+	reg = BYTGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PCONF0);
+	val = bytgpio_read_4(sc, reg);
+
+	KASSERT((val & BYTGPIO_PCONF0_INTR_MASK) != 0,
+	    ("%s: interrupt already disabled on pin 0x%x", __func__, pin));
+
+	val &= ~BYTGPIO_PCONF0_INTR_MASK;
+	bytgpio_write_4(sc, reg, val);
+
+	BYTGPIO_UNLOCK(sc);
+}
+
+static inline void
+bytgpio_nmask_intr(device_t dev, uint32_t pin, bool mask)
+{
+	struct bytgpio_softc *sc;
+
+	sc = device_get_softc(dev);
+	BYTGPIO_LOCK(sc);
+	BYTGPIO_ASSERT_PIN_OK(sc, pin);
+
+	sc->sc_pins[pin].masked = mask;
+	BYTGPIO_UNLOCK(sc);
+}
+
+static void
+bytgpio_mask_intr(device_t dev, uint32_t pin)
+{
+	bytgpio_nmask_intr(dev, pin, true);
+}
+
+static void
+bytgpio_unmask_intr(device_t dev, uint32_t pin)
+{
+	bytgpio_nmask_intr(dev, pin, false);
 }
 
 static int
@@ -602,33 +780,59 @@ bytgpio_attach(device_t dev)
 		goto error;
 	}
 
-	sc->sc_pad_funcs = malloc(sizeof(int)*sc->sc_npins, M_DEVBUF,
+	sc->sc_pins = malloc(sizeof(*sc->sc_pins)*sc->sc_npins, M_DEVBUF,
 	    M_WAITOK | M_ZERO);
 
 	sc->sc_mem_rid = 0;
 	sc->sc_mem_res = bus_alloc_resource_any(sc->sc_dev,
 	    SYS_RES_MEMORY, &sc->sc_mem_rid, RF_ACTIVE);
 	if (sc->sc_mem_res == NULL) {
-		device_printf(dev, "can't allocate resource\n");
+		device_printf(dev, "can't allocate memory resource\n");
+		goto error;
+	}
+
+	sc->sc_irq_rid = 0;
+	sc->sc_irq_res = bus_alloc_resource_any(sc->sc_dev,
+	    SYS_RES_IRQ, &sc->sc_irq_rid, RF_ACTIVE);
+	if (sc->sc_irq_res == NULL) {
+		device_printf(dev, "can't allocate interrupt resource\n");
+		bus_release_resource(dev, SYS_RES_MEMORY, sc->sc_mem_rid,
+		    sc->sc_mem_res);
 		goto error;
 	}
 
 	for (pin = 0; pin < sc->sc_npins; pin++) {
-	    reg = BYTGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PCONF0);
-	    val = bytgpio_read_4(sc, reg);
-	    sc->sc_pad_funcs[pin] = val & BYTGPIO_PCONF0_FUNC_MASK;
+		reg = BYTGPIO_PIN_REGISTER(sc, pin, BYTGPIO_PCONF0);
+		val = bytgpio_read_4(sc, reg);
+
+
+		/* Clear interrupt bits. */
+		val &= ~BYTGPIO_PCONF0_INTR_MASK;
+		sc->sc_pins[pin].flags = val;
+		if (bytgpio_pad_is_gpio(sc, pin))
+			bytgpio_write_4(sc, reg, val);
 	}
+
+	if (bus_setup_intr(dev, sc->sc_irq_res, INTR_TYPE_MISC | INTR_MPSAFE,
+	    bytgpio_intr, NULL, sc, &sc->sc_irq_cookie) != 0) {
+		device_printf(dev, "failed to setup interrupt\n");
+		goto free_resources;
+	}
+
 
 	sc->sc_busdev = gpiobus_attach_bus(dev);
 	if (sc->sc_busdev == NULL) {
-		BYTGPIO_LOCK_DESTROY(sc);
-		bus_release_resource(dev, SYS_RES_MEMORY,
-		    sc->sc_mem_rid, sc->sc_mem_res);
-		return (ENXIO);
+		bus_teardown_intr(dev, sc->sc_irq_res, sc->sc_irq_cookie);
+		goto free_resources;
 	}
 
 	return (0);
 
+free_resources:
+	bus_release_resource(dev, SYS_RES_MEMORY, sc->sc_mem_rid,
+	    sc->sc_mem_res);
+	bus_release_resource(dev, SYS_RES_MEMORY, sc->sc_irq_rid,
+	    sc->sc_irq_res);
 error:
 	BYTGPIO_LOCK_DESTROY(sc);
 
@@ -648,12 +852,17 @@ bytgpio_detach(device_t dev)
 
 	BYTGPIO_LOCK_DESTROY(sc);
 
-	if (sc->sc_pad_funcs)
-		free(sc->sc_pad_funcs, M_DEVBUF);
+	if (sc->sc_pins)
+		free(sc->sc_pins, M_DEVBUF);
 
 	if (sc->sc_mem_res != NULL)
 		bus_release_resource(dev, SYS_RES_MEMORY,
 		    sc->sc_mem_rid, sc->sc_mem_res);
+	if (sc->sc_irq_res != NULL) {
+		bus_teardown_intr(dev, sc->sc_irq_res, sc->sc_irq_cookie);
+		bus_release_resource(dev, SYS_RES_IRQ, sc->sc_irq_rid,
+		    sc->sc_irq_res);
+	}
 
 	return (0);
 }
@@ -674,6 +883,14 @@ static device_method_t bytgpio_methods[] = {
 	DEVMETHOD(gpio_pin_get, bytgpio_pin_get),
 	DEVMETHOD(gpio_pin_set, bytgpio_pin_set),
 	DEVMETHOD(gpio_pin_toggle, bytgpio_pin_toggle),
+
+	/* GPIO interrupt controller interface */
+	DEVMETHOD(gpio_pin_config_intr, bytgpio_config_intr),
+	DEVMETHOD(gpio_pin_enable_intr, bytgpio_enable_intr),
+	DEVMETHOD(gpio_pin_disable_intr, bytgpio_disable_intr),
+	DEVMETHOD(gpio_pin_mask_intr, bytgpio_mask_intr),
+	DEVMETHOD(gpio_pin_unmask_intr, bytgpio_unmask_intr),
+	/* XXX implement EOI? */
 
 	DEVMETHOD_END
 };
