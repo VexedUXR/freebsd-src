@@ -186,6 +186,10 @@ void gpiobus_free_ivars(struct gpiobus_ivar *);
 int gpiobus_read_ivar(device_t, device_t, int, uintptr_t *);
 int gpiobus_acquire_pin(device_t, uint32_t);
 int gpiobus_release_pin(device_t, uint32_t);
+#ifndef INTRNG
+int gpiopic_check_intr_pin(struct gpiopic *, uint32_t);
+void gpiopic_config_intr(struct gpiopic *, uint32_t, uint32_t);
+#endif
 
 extern driver_t gpiobus_driver;
 

@@ -589,11 +589,15 @@ int
 gpiobus_detach(device_t dev)
 {
 	struct gpiobus_softc *sc;
+#ifndef INTRNG
 	struct gpiopic *pic;
+#endif
 	int i, err;
 
 	sc = GPIOBUS_SOFTC(dev);
+#ifndef INTRNG
 	pic = sc->sc_pic;
+#endif
 	KASSERT(mtx_initialized(&sc->sc_mtx),
 	    ("gpiobus mutex not initialized"));
 
@@ -628,10 +632,12 @@ gpiobus_suspend(device_t dev)
 static int
 gpiobus_resume(device_t dev)
 {
+#ifndef INTRNG
 	struct gpiobus_softc *sc;
 
 	sc = GPIOBUS_SOFTC(dev);
 	gpiobus_pic_resume(sc->sc_pic);
+#endif
 	return (bus_generic_resume(dev));
 }
 
@@ -1160,14 +1166,18 @@ gpiopic_disable_intr(struct gpiopic_intsrc *gisrc)
 	GPIO_PIN_DISABLE_INTR(gisrc->is_pic->sc->sc_dev, gisrc->is_pin);
 }
 
-static void
-gpiopic_config_intr(struct gpiopic_intsrc *gisrc, uint32_t intr_mode) {
+void
+//gpiopic_config_intr(struct gpiopic_intsrc *gisrc, uint32_t intr_mode)
+gpiopic_config_intr(struct gpiopic *gpiopic, uint32_t pin, uint32_t intr_mode)
+{
+	struct gpiopic_intsrc *gisrc = &gpiopic->intr_srcs[pin];
+
 	gisrc->is_mode = intr_mode;
 	GPIO_PIN_CONFIG_INTR(gisrc->is_pic->sc->sc_dev, gisrc->is_pin,
 	    intr_mode);
 }
 
-static int
+int
 gpiopic_check_intr_pin(struct gpiopic *gpiopic, uint32_t pin)
 {
 	struct gpiopic_intsrc *gisrc;
@@ -1343,7 +1353,7 @@ gpiobus_pic_resume(struct gpiopic *gpiopic)
 			continue;
 
 		if (gisrc->is_mode != GPIO_INTR_CONFORM)
-			gpiopic_config_intr(gisrc, gisrc->is_mode);
+			gpiopic_config_intr(gpiopic, i, gisrc->is_mode);
 		if (gisrc->is_masked)
 			gpiopic_mask_intr(gisrc);
 		else
@@ -1520,7 +1530,6 @@ gpio_alloc_intr_resource(device_t consumer_dev, int *rid, u_int alloc_flags,
 {
 	struct resource *res;
 	struct gpiobus_softc *sc;
-	struct gpiopic_intsrc *gisrc;
 	device_t busdev;
 	uint32_t caps;
 	int err;
@@ -1557,8 +1566,7 @@ gpio_alloc_intr_resource(device_t consumer_dev, int *rid, u_int alloc_flags,
 	res = BUS_ALLOC_RESOURCE(busdev, consumer_dev, SYS_RES_IRQ, rid,
 	    pin->pin, pin->pin, 1, alloc_flags);
 	if (res != NULL && intr_mode != GPIO_INTR_CONFORM) {
-		gisrc = &sc->sc_pic->intr_srcs[pin->pin];
-		gpiopic_config_intr(gisrc, intr_mode);
+		gpiopic_config_intr(sc->sc_pic, pin->pin, intr_mode);
 	}
 	return (res);
 }
