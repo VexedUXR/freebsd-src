@@ -116,6 +116,8 @@ struct r12a_tx_desc {
 #define R12A_TXDW5_RTS_PRIM_CHAN_S	13
 
 	uint32_t	txdw6;
+#define R12A_TXDW6_SW_DEFINE_M	0x00000fff
+#define R12A_TXDW6_SW_DEFINE_S	0
 #define R21A_TXDW6_MBSSID_M	0x0000f000
 #define R21A_TXDW6_MBSSID_S	12
 

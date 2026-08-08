@@ -376,7 +376,7 @@ r12a_fill_tx_desc(struct rtwn_softc *sc, struct ieee80211_node *ni,
 
 			if (sc->sc_ratectl == RTWN_RATECTL_NET80211) {
 				txd->txdw2 |= htole32(R12A_TXDW2_SPE_RPT);
-				sc->sc_tx_n_active++;
+				txd->txdw6 |= htole32(SM(R12A_TXDW6_SW_DEFINE, sc->sc_tx_n_active++));
 			}
 
 			if (RTWN_RATE_IS_CCK(ridx) && ridx != RTWN_RIDX_CCK1 &&

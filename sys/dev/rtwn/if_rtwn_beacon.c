@@ -122,6 +122,7 @@ rtwn_setup_beacon(struct rtwn_softc *sc, struct ieee80211_node *ni)
 
 	if (uvp->bcn_mbuf != NULL) {
 		rtwn_beacon_unload(sc, uvp->id);
+		/* XXX double free here on ifconfig destroy, probably with vap delete? */
 		m_freem(uvp->bcn_mbuf);
 	}
 

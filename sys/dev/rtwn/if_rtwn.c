@@ -1348,6 +1348,10 @@ rtwn_run(struct rtwn_softc *sc, struct ieee80211vap *vap)
 	error = 0;
 	ni = ieee80211_ref_node(vap->iv_bss);
 
+	vap->iv_debug = IEEE80211_MSG_ANY;
+	//vap->iv_debug = IEEE80211_MSG_ANY & ~(IEEE80211_MSG_ELEMID |
+	//    IEEE80211_MSG_DUMPPKTS | IEEE80211_MSG_DEBUG);
+
 	if (ic->ic_bsschan == IEEE80211_CHAN_ANYC ||
 	    ni->ni_chan == IEEE80211_CHAN_ANYC) {
 		error = EINVAL;
